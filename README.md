@@ -18,6 +18,8 @@ Install the LoRA from the official repository:
 pip install git+https://github.com/microsoft/LoRA
 ```
 
+## Developers
+
 Simply add it to your model before the training loop.
 
 ```python
