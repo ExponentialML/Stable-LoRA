@@ -1,0 +1,10 @@
+diffusers
+transformers
+scipy
+ftfy
+wandb
+numpy
+safetensors
+opencv-python
+torch
+torchvision
