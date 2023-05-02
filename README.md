@@ -75,7 +75,7 @@ optimizer_params = unet_params + text_encoder_params
 Saving can be done using safetensors or the traditional way, using `.pt` files:
 
 ```python
-from stable_lora.lora import add_lora_to, UNET_REPLACE, TEXT_ENCODER_REPLACE
+from stable_lora.lora import save_lora
 
 save_lora(unet, path='save_file_path.safetensors')
 save_lora(text_encoder=text_encoder, use_safetensors=False, path='save_file_path.pt')
