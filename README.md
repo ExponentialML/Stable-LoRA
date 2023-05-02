@@ -33,7 +33,12 @@ pipeline.unet.requires_grad_(False)
 pipeline.text_encoder.requires_grad_(False)
 
 # Add LoRA to the UNET
-add_lora_to(pipeline.unet, target_module=UNET_REPLACE, search_class=[torch.nn.Linear, torch.nn.Conv2d], r=32)
+add_lora_to(
+    pipeline.unet, 
+    target_module=UNET_REPLACE, 
+    search_class=[torch.nn.Linear, torch.nn.Conv2d], 
+    r=32
+)
 
 # Add LoRA to the Text Encoder
 add_lora_to(pipeline.text_encoder, target_module=TEXT_ENCODER_REPLACE, r=32)
