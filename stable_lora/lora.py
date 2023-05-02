@@ -10,6 +10,9 @@ except:
 UNET_REPLACE = ["Transformer2DModel", "ResnetBlock2D"]
 TEXT_ENCODER_REPLACE = ["CLIPEncoderLayer"]
 
+UNET_ATTENTION_REPLACE = ["CrossAttention"]
+TEXT_ENCODER_ATTENTION_REPLACE = ["CLIPAttention"]
+
 """
 Copied from: https://github.com/cloneofsimo/lora/blob/bdd51b04c49fa90a88919a19850ec3b4cf3c5ecd/lora_diffusion/lora.py#L189
 """
@@ -96,8 +99,7 @@ def add_lora_to(
         
         # Assign the frozen weight of model's Linear or Conv2d to the LoRA model.
         l.weight =  module._modules[name].weight
-        l.train()
-        
+
         # Replace the new LoRA model with the model's Linear or Conv2d module.
         module._modules[name] = l
 
@@ -126,3 +128,19 @@ def load_lora(model, lora_path: str):
 
     except Exception as e:
         print(f"Could not load your lora file: {e}")
+
+def set_mode(model, train=False):
+    is_train = False
+    is_eval = False
+    for n, m in model.named_modules():
+        is_lora = isinstance(m, loralb.Linear) or isinstance(m, loralb.Conv2d)
+        if is_lora:
+            if train:
+                is_train = True
+                m.train()
+            else:
+                is_eval = True
+                m.eval()
+    
+    if is_train: print("Train mode enabled for LoRA.")
+    if is_eval: print("Evaluation mode enabled for LoRA.")
