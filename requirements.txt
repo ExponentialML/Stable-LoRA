@@ -9,3 +9,4 @@ safetensors
 opencv-python
 torch
 torchvision
+git+https://github.com/microsoft/LoRA
