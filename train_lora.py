@@ -91,6 +91,19 @@ class DreamBoothDataset(Dataset):
         self.image_transforms = self.compose()
         self.normalized_mean_std = self.get_dataset_norm(class_data_root)
 
+
+    def gather_norm(self, img, mean=None, std=None):
+        channels = img.shape[0]
+
+        if all(x is None for x in [mean, std]):
+            mean, std = torch.zeros(channels), torch.zeros(channels)
+
+        for i in range(channels):
+            mean[i] += img[i, :, :].mean()
+            std[i] += img[i, :, :].std()    
+        
+        return mean, std
+
     def get_dataset_norm(self, class_data_root):
         if self.dataset_norm:
             imgs_to_process = self.instance_images_path
@@ -98,18 +111,17 @@ class DreamBoothDataset(Dataset):
             if class_data_root is not None:
                 imgs_to_process += self.class_images_path
 
-            mean = 0
-            std = 0
+            mean = None
+            std = None
             
             for img in tqdm(imgs_to_process, desc="Processing image normalization..."):
                 img = Image.open(img).convert("RGB")
                 img = self.image_transforms(img)
                 
-                mean += img.mean()
-                std += img.std()
+                mean, std = self.gather_norm(img, mean, std)
 
-            mean = [mean / len(imgs_to_process)]
-            std = [std / len(imgs_to_process)]
+            mean.div_(len(imgs_to_process))
+            std.div_(len(imgs_to_process))
 
             print(f"Dataset mean and std are: {mean}, {std}")
             
@@ -139,10 +151,7 @@ class DreamBoothDataset(Dataset):
         img_composed = self.image_transforms(img)
 
         if not self.dataset_norm:
-            mean = 0.5 if img_composed.mean() > 0.5 else img_composed.mean()
-            std = 0.5 if img_composed.std() > 0.5 else img_composed.std()
-
-            mean, std = [mean], [std]
+            mean, std = self.gather_norm(img_composed)
         else:
             mean, std = self.normalized_mean_std
 
@@ -163,6 +172,7 @@ class DreamBoothDataset(Dataset):
             truncation=True,
             max_length=self.tokenizer.model_max_length,
         ).input_ids
+
 
     def get_train_sample(self, index, example, base_name, folder, prompt):
         image = self.open_img(index, self.instance_images_path)
