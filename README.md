@@ -40,7 +40,7 @@ add_lora_to(text_encoder, target_module=TEXT_ENCODER_REPLACE, r=32)
 ## Tips
 
 This has been tested on Stable Diffusion 1.5 Based models. It is recommended to use a very high learning rate such as `1e-4` or `1e-3`. 
-The default rank is `256`, but can be set by passing it through the `r` parameter. Using lower ranks will consume less memory per usual.
+The default rank is `32`, but can be set by passing it through the `r` parameter. Using lower ranks will consume less memory per usual.
 
 These factors will be solely dependent on your task, but are a good starting point.
 
