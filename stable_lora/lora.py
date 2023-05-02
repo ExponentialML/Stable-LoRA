@@ -1,6 +1,7 @@
 import torch
 import os
 import loralib as loralb
+from .convert_to_compvis import convert_unet_state_dict, convert_text_enc_state_dict
 
 try:
     from safetensors.torch import save_file, safe_open
@@ -106,14 +107,42 @@ def add_lora_to(
     # Unfreeze only the newly added LoRA weights, but keep the model frozen.
     loralb.mark_only_lora_as_trainable(model, bias=lora_bias)
 
-def save_lora(unet=None, text_encoder=None, use_safetensors=True, path='model.pt', lora_bias='none'):
-    for model in [unet, text_encoder]:
+def save_lora(unet=None, text_encoder=None, use_safetensors=True, path='model.pt', lora_bias='none', save_for_webui=True):
+    for i, model in enumerate([unet, text_encoder]):
         if model is not None:
-            lora_dict = loralb.lora_state_dict(model, bias=lora_bias)
+
+            # Get save method depending on use_safetensors
+            save_method = save_file if use_safetensors else torch.save
+
             if use_safetensors:
-                save_file(lora_dict, path.replace('.pt', '.safetensors'))
+                ext = '.safetensors'
+                save_path = path.replace('.pt',ext)
             else:
-                torch.save(lora_dict, path.replace('.safetensors', '.pt'))
+                ext = '.pt'
+                save_path = path.replace('.safetensors', ext)
+
+            # Load only the LoRAs from the state dict.
+            lora_dict = loralb.lora_state_dict(model, bias=lora_bias)
+
+            # Save the models as fp32. This ensures we can finetune again without having to upcast.                      
+            save_method(lora_dict, save_path)
+            
+            if save_for_webui:
+            
+                # Pick the conversion script based off loop index (unet, text_encoder)
+                converter = (
+                    convert_unet_state_dict if i == 0 else
+                    convert_text_enc_state_dict
+                )
+
+                # Convert the keys to compvis model and webui 
+                lora_dict_fp16 = converter(lora_dict)
+                
+                # Cast tensors to fp16. It's assumed we won't be finetuning these.
+                for k, v in lora_dict_fp16.items():
+                    lora_dict_fp16[k] = v.to(dtype=torch.float16)
+            
+                save_method(lora_dict_fp16, path.replace(ext, f"_webui{ext}"))
 
 def load_lora(model, lora_path: str):
     try:
