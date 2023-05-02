@@ -76,17 +76,19 @@ save_lora(text_encoder=text_encoder, use_safetensors=False, path='save_file_path
 
 This has been tested on Stable Diffusion 1.5 Based models.
 
-It is recommended to use a very high learning rate such as `1e-4` or `1e-3`. 
+It is reccomended to try `5e-6`, `3e-5`, and `1e-4` learning rates. 
 
-The default rank is `32`, but can be set by passing it through the `r` parameter. Using lower ranks will consume less memory per usual.
+The default rank is `32`, but can be set by passing it through the `r` parameter. Using lower ranks will consume less memory, with high ranks consuming more. 
+This also contributes to file save sizes.
 
 These factors will be solely dependent on your task, but are a good starting point.
 
 ## TODO
 - [ ] Add Diffusers Training Scripts for Dreambooth and Finetuning.
-- [ ] Implement saving and Loading LoRA's (`PT` & `safetensors`).
+- [x] Implement saving and Loading LoRA's (`PT` & `safetensors`).
 - [ ] Add as a Stable Diffusion webui Extension for inference.
 - [ ] Possible integrations for webui training.
 
 ## Credits
 [cloneofsimo](https://github.com/cloneofsimo/lora) For their LoRA implementation code.
+[Microsoft](https://github.com/microsoft/LoRA) For the official code.
