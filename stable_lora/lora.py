@@ -1,7 +1,11 @@
 import torch
 import os
 import loralib as loralb
-from safetensors.torch import save_file
+
+try:
+    from safetensors.torch import save_file, safe_open
+except: 
+    print("Safetensors is not installed. Saving while using use_safetensors will fail.")
 
 UNET_REPLACE = ["Transformer2DModel", "ResnetBlock2D"]
 TEXT_ENCODER_REPLACE = ["CLIPEncoderLayer"]
@@ -92,19 +96,31 @@ def add_lora_to(model, target_module=UNET_REPLACE, search_class=[torch.nn.Linear
         module._modules[name] = l
 
     # Unfreeze only the newly added LoRA weights, but keep the model frozen.
-    loralb.mark_only_lora_as_trainable(model)
+    loralb.mark_only_lora_as_trainable(model, bias='lora_only')
 
 def get_lora_modules(model):
     lora_dict = {k: v for k, v in model.state_dict().items() if 'lora' in k}
     return lora_dict
 
-def save_lora(unet=None, text_encoder=None, use_safetensor=True, path='model.pt'):
+def save_lora(unet=None, text_encoder=None, use_safetensors=True, path='model.pt'):
     for model in [unet, text_encoder]:
         if model is not None:
             lora_dict = get_lora_modules(model)
-            if use_safetensor:
+            if use_safetensors:
                 save_file(lora_dict, path.replace('.pt', '.safetensors'))
             else:
                 torch.save(lora_dict, path.replace('.safetensors', '.pt'))
 
-    
+def load_lora(model, lora_path: str):
+    try:
+        if os.path.exists(lora_path):
+
+            if lora_path.endswith('.safetensors'):
+                lora_dict = safe_open(lora_path, framework='pt')
+            else:
+                lora_dict = torch.load(lora_path)
+
+            model.load_state_dict(lora_dict, strict=False)
+            
+    except Exception as e:
+        print(f"Could not load your lora file: {e}")
