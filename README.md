@@ -1,7 +1,8 @@
 # Stable LoRA (WIP)
 Train LoRA using Microsoft's official implementation with Stable Diffusion models.
-
 This is the most efficient and easiest way to train LoRAs without the added complexity while also being shareable between libraries and implementations. 
+
+🚧 *This repo is still in active development. Expect bugs until the *WIP* flag is removed.* 🚧
 
 ## Getting Started
 
