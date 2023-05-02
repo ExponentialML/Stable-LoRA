@@ -82,11 +82,23 @@ save_lora(text_encoder=text_encoder, use_safetensors=False, path='save_file_path
 
 ```
 
+Additionally, you can set the mode to evaluation or train mode.
+
+```python
+from stable_lora.lora import set_mode
+
+# Train mode
+set_mode(unet, is_train=True)
+
+# Evaluation mode
+set_mode(unet, is_train=False)
+```
+
 ## Tips
 
 This has been tested on Stable Diffusion 1.5 Based models.
 
-It is reccomended to try `5e-6`, `3e-5`, and `1e-4` learning rates. 
+It is recommended to try `5e-6`, `3e-5`, and `1e-4` learning rates. 
 
 The default rank is `32`, but can be set by passing it through the `r` parameter. Using lower ranks will consume less memory, with high ranks consuming more. 
 This also contributes to file save sizes.
