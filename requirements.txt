@@ -1,5 +1,6 @@
 diffusers
 transformers
+accelerate
 scipy
 ftfy
 wandb
