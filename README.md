@@ -18,12 +18,6 @@ Install requirements from this repository:
 pip install -r requirements.txt
 ```
 
-Install the LoRA from the official repository:
-
-```bash
-pip install git+https://github.com/microsoft/LoRA
-```
-
 ### Example
 
 Training is done by using the Diffusers library. 
