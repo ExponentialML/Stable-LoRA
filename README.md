@@ -12,11 +12,48 @@ Clone this repository into your training folder:
 git clone https://github.com/ExponentialML/Stable-LoRA
 ```
 
+Install requirements from this repository:
+
+```bash
+pip install -r requirements.txt
+```
+
 Install the LoRA from the official repository:
 
 ```bash
 pip install git+https://github.com/microsoft/LoRA
 ```
+
+### Example
+
+Training is done by using the Diffusers library. See [example_train_script.sh](https://github.com/ExponentialML/Stable-LoRA/blob/main/example_train_script.sh) for an example script of Dreambooth.
+
+Running it is as easy as doing:
+
+```python
+accelerate launch train_lora.py \
+  --pretrained_model_name_or_path="runwayml/stable-diffusion-v1-5" \
+  --instance_data_dir="instance_images" \
+  --lora_rank=64 \
+  --output_dir="./output" \
+  --instance_prompt="a shld dog" \
+  --resolution=512 \
+  --mixed_precision="fp16" \
+  --train_text_encoder \
+  --learning_rate=1e-4 \
+  --resize=True \
+  --save_steps=200 \
+  --preview_steps=100 \
+  --lr_scheduler="constant_with_warmup" \
+  --lr_warmup_steps=50 \
+  --max_train_steps=5000 \
+  --save_preview \
+  --preview_prompt="a shld dog as a super hero"
+```
+
+After training, results will be saved in your output folder. 
+
+By default, a AUTOMATIC1111 webui variant is saved alongside them (webui extension is in development).
 
 ## Developers
 
