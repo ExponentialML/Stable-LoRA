@@ -92,6 +92,19 @@ This also contributes to file save sizes.
 
 These factors will be solely dependent on your task, but are a good starting point.
 
+You can also enable biases to train as well. 
+
+Depending on your data and learning rate, you may be able to squeeze extra performance out of training.
+```python
+# Example | Applicable to Unet or Text Encoder
+
+lora_bias = 'lora_only'
+add_lora_to(pipeline.text_encoder, target_module=TEXT_ENCODER_REPLACE, r=32, lora_bias=lora_bias)
+
+# Must be set here as well when saving.
+save_lora(text_encoder=text_encoder, use_safetensors=True, path='save_file_path.pt', lora_bias=lora_bias)
+```
+
 ## TODO
 - [ ] Add Diffusers Training Scripts for Dreambooth and Finetuning.
 - [x] Implement saving and Loading LoRA's (`PT` & `safetensors`).
@@ -100,4 +113,5 @@ These factors will be solely dependent on your task, but are a good starting poi
 
 ## Credits
 [cloneofsimo](https://github.com/cloneofsimo/lora) For their LoRA implementation code.
+
 [Microsoft](https://github.com/microsoft/LoRA) For the official code.
