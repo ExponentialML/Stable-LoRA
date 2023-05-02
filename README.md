@@ -28,11 +28,15 @@ from diffusers import StableDiffusionPipeline
 # Load a Stable Diffusion Model
 pipeline = StableDiffusionPipeline.from_pretrained(pretrained_model_name_or_path)
 
+# Freeze the models. Remember, only the LoRA weights get trained, not the model itself.
+pipeline.unet.requires_grad_(False)
+pipeline.text_encoder.requires_grad_(False)
+
 # Add LoRA to the UNET
-add_lora_to(unet, target_module=UNET_REPLACE, search_class=[torch.nn.Linear, torch.nn.Conv2d], r=32)
+add_lora_to(pipeline.unet, target_module=UNET_REPLACE, search_class=[torch.nn.Linear, torch.nn.Conv2d], r=32)
 
 # Add LoRA to the Text Encoder
-add_lora_to(text_encoder, target_module=TEXT_ENCODER_REPLACE, r=32)
+add_lora_to(pipeline.text_encoder, target_module=TEXT_ENCODER_REPLACE, r=32)
 
 # Your optimizers and training code...
 ```
