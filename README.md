@@ -37,6 +37,31 @@ add_lora_to(text_encoder, target_module=TEXT_ENCODER_REPLACE, r=32)
 # Your optimizers and training code...
 ```
 
+After adding the LoRA to your model, you can easily add parameter wise optimizer params if needed.
+
+```python
+# Example
+
+unet_params = []
+text_encoder_params = []
+
+for n, p in unet.named_parameters():
+    if 'lora' in n:
+        unet_params.append({
+            "params": p, 
+            "lr": args.learning_rate
+        })
+
+for n, p in text_encoder.named_parameters():
+    if 'lora' in n:
+        text_encoder_params.append({
+            "params": p, 
+            "lr": args.learning_rate_text
+        })
+
+optimizer_params = unet_params + text_encoder_params
+```
+
 Saving can be done using safetensors or the traditional way, using `.pt` files:
 
 ```python
