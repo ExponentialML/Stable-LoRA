@@ -58,8 +58,8 @@ def find_modules(
 def create_lora_linear(child_module, r):
     return loralb.Linear(
         child_module.in_features, 
-        child_module.out_features, r=r, 
-        merge_weights=True
+        child_module.out_features, 
+        r=r
     )
 
 def create_lora_conv(child_module, r):
@@ -68,8 +68,7 @@ def create_lora_conv(child_module, r):
                 child_module.out_channels,
                 kernel_size=child_module.kernel_size[0],
                 padding=child_module.padding ,
-                r=r, 
-                merge_weights=True
+                r=r
             )
 
 def add_lora_to(
@@ -97,7 +96,8 @@ def add_lora_to(
         
         # Assign the frozen weight of model's Linear or Conv2d to the LoRA model.
         l.weight =  module._modules[name].weight
-
+        l.train()
+        
         # Replace the new LoRA model with the model's Linear or Conv2d module.
         module._modules[name] = l
 
