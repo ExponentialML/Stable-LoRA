@@ -26,7 +26,9 @@ pip install git+https://github.com/microsoft/LoRA
 
 ### Example
 
-Training is done by using the Diffusers library. See [example_train_script.sh](https://github.com/ExponentialML/Stable-LoRA/blob/main/example_train_script.sh) for an example script of Dreambooth.
+Training is done by using the Diffusers library. 
+
+See [example_train_script.sh](https://github.com/ExponentialML/Stable-LoRA/blob/main/example_train_script.sh) for an example script of Dreambooth.
 
 Running it is as easy as doing:
 
