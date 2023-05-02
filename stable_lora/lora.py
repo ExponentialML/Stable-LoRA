@@ -72,7 +72,13 @@ def create_lora_conv(child_module, r):
                 merge_weights=True
             )
 
-def add_lora_to(model, target_module=UNET_REPLACE, search_class=[torch.nn.Linear], r=32):
+def add_lora_to(
+    model, 
+    target_module=UNET_REPLACE, 
+    search_class=[torch.nn.Linear], 
+    r=32, 
+    lora_bias='none'
+):
     for module, name, child_module in find_modules(
         model, 
         ancestor_class=target_module, 
@@ -96,16 +102,12 @@ def add_lora_to(model, target_module=UNET_REPLACE, search_class=[torch.nn.Linear
         module._modules[name] = l
 
     # Unfreeze only the newly added LoRA weights, but keep the model frozen.
-    loralb.mark_only_lora_as_trainable(model, bias='lora_only')
+    loralb.mark_only_lora_as_trainable(model, bias=lora_bias)
 
-def get_lora_modules(model):
-    lora_dict = {k: v for k, v in model.state_dict().items() if 'lora' in k}
-    return lora_dict
-
-def save_lora(unet=None, text_encoder=None, use_safetensors=True, path='model.pt'):
+def save_lora(unet=None, text_encoder=None, use_safetensors=True, path='model.pt', lora_bias='none'):
     for model in [unet, text_encoder]:
         if model is not None:
-            lora_dict = get_lora_modules(model)
+            lora_dict = loralb.lora_state_dict(model, bias=lora_bias)
             if use_safetensors:
                 save_file(lora_dict, path.replace('.pt', '.safetensors'))
             else:
@@ -121,6 +123,6 @@ def load_lora(model, lora_path: str):
                 lora_dict = torch.load(lora_path)
 
             model.load_state_dict(lora_dict, strict=False)
-            
+
     except Exception as e:
         print(f"Could not load your lora file: {e}")
