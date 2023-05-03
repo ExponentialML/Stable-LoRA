@@ -105,7 +105,7 @@ def convert_unet_state_dict(unet_state_dict):
             v = v.replace(hf_part, sd_part)
         mapping[k] = v
     new_state_dict = {v: unet_state_dict[k] for k, v in mapping.items() if k in unet_state_dict}
-    return prepend_unet_key(unet_state_dict)
+    return prepend_unet_key(new_state_dict)
 
 def prepend_unet_key(unet_state_dict):
     return {"model.diffusion_model." + k: v for k, v in unet_state_dict.items()}
