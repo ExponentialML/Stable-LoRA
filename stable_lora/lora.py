@@ -166,10 +166,9 @@ def set_mode(model, train=False):
         if is_lora:
             if train:
                 is_train = True
-                m.train()
             else:
                 is_eval = True
-                m.eval()
+                m.train(train)
     
     if is_train: print("Train mode enabled for LoRA.")
     if is_eval: print("Evaluation mode enabled for LoRA.")
