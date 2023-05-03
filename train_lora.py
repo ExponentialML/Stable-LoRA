@@ -431,7 +431,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--lora_bias",
         type=str,
-        default="none",
+        default="all",
         help="Whether or not to use bias when training LoRA.",
         choices=["none", "lora_only", "all"]
     )
