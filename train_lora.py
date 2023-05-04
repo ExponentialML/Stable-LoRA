@@ -776,6 +776,7 @@ def main(args):
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
+        amsgrad=True
     )
 
     noise_scheduler = DDPMScheduler.from_config(
@@ -1045,29 +1046,17 @@ def main(args):
 
                 if args.save_steps and global_step - last_save >= args.save_steps:
                     if accelerator.is_main_process:
-                  
-                        lora_out_file = (
-                            f"{args.output_dir}/lora_weight_e{epoch}_s{global_step}.safetensors"
-                        )
+                        lora_out_file = f"lora_weight_e{epoch}_s{global_step}.safetensors"
                         save_lora(
-                            unet, 
-                            path=lora_out_file, 
+                            unet=unet, 
+                            text_encoder=text_encoder,
+                            save_text_weights=args.train_text_encoder,
+                            output_dir=args.output_dir,
+                            lora_filename=lora_out_file,
                             lora_bias=args.lora_bias, 
                             save_for_webui=args.save_for_webui
                         )
-
-                        if args.train_text_encoder:
-                            lora_out_file_text = (
-                                f"{args.output_dir}/text_lora_weight_e{epoch}_s{global_step}.safetensors"
-                            )
-                            save_lora(
-                                text_encoder=text_encoder, 
-                                path=lora_out_file_text, 
-                                lora_bias=args.lora_bias, 
-                                save_for_webui=args.save_for_webui
-                            )
- 
-                        print(f"LoRA checkpoints have been saved to ${args.output_dir}")
+                        print(f"LoRA checkpoints have been saved to {args.output_dir}")
                         last_save = global_step
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}

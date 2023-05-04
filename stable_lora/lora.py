@@ -59,11 +59,12 @@ def find_modules(
                     # Otherwise, yield it
                     yield parent, name, module
 
-def create_lora_linear(child_module, r):
+def create_lora_linear(child_module, r, dropout=0):
     return loralb.Linear(
         child_module.in_features, 
         child_module.out_features, 
-        r=r
+        r=r,
+        lora_dropout=dropout
     )
 
 def create_lora_conv(child_module, r):
@@ -71,13 +72,14 @@ def create_lora_conv(child_module, r):
                 child_module.in_channels, 
                 child_module.out_channels,
                 kernel_size=child_module.kernel_size[0],
-                padding=child_module.padding ,
-                r=r
+                padding=child_module.padding,
+                r=r,
             )
 
 def add_lora_to(
     model, 
     target_module=UNET_REPLACE, 
+    is_text=False,
     search_class=[torch.nn.Linear], 
     r=32, 
     lora_bias='none'
@@ -87,9 +89,12 @@ def add_lora_to(
         ancestor_class=target_module, 
         search_class=search_class
     ):
+        # Drop 10% of the text conditioning to improve classifier free guidance
+        dropout = 0.1 if is_text else 0
+
         # Check if the child module of the model is type Linear or Conv2d.
         if isinstance(child_module, torch.nn.Linear):
-            l = create_lora_linear(child_module, r)
+            l = create_lora_linear(child_module, r, dropout)
 
         if isinstance(child_module, torch.nn.Conv2d):
             l = create_lora_conv(child_module, r)
@@ -107,43 +112,68 @@ def add_lora_to(
     # Unfreeze only the newly added LoRA weights, but keep the model frozen.
     loralb.mark_only_lora_as_trainable(model, bias=lora_bias)
 
-def save_lora(unet=None, text_encoder=None, use_safetensors=True, path='model.pt', lora_bias='none', save_for_webui=True):
-    for i, model in enumerate([unet, text_encoder]):
-        if model is not None:
+def save_lora(
+        unet=None, 
+        text_encoder=None, 
+        save_text_weights=False,
+        output_dir="output",
+        lora_filename="lora.safetensors",
+        use_safetensors=True, 
+        lora_bias='none', 
+        save_for_webui=True
+    ):
 
-            # Get save method depending on use_safetensors
-            save_method = save_file if use_safetensors else torch.save
+        # Create directory for the full LoRA weights.
+        trainable_weights_dir = f"{output_dir}/full_weights"
+        lora_out_file_full_weight = f"{trainable_weights_dir}/{lora_filename}"
+        os.makedirs(trainable_weights_dir, exist_ok=True)
 
-            if use_safetensors:
-                ext = '.safetensors'
-                save_path = path.replace('.pt',ext)
-            else:
-                ext = '.pt'
-                save_path = path.replace('.safetensors', ext)
+        # Create LoRA out filename.
+        lora_out_file = f"{output_dir}/{lora_filename}"
 
+        # Get save method depending on use_safetensors
+        save_method = save_file if use_safetensors else torch.save
+        
+        if use_safetensors:
+            ext = '.safetensors'
+            save_path_full_weights = lora_out_file_full_weight.replace('.pt', ext)
+            save_path = lora_out_file.replace('.pt',ext)
+        else:
+            ext = '.pt'
+            save_path_full_weights = lora_out_file_full_weight.replace('.safetensors', ext)
+            save_path = lora_out_file.replace('.safetensors', ext)
+
+        for i, model in enumerate([unet, text_encoder]):
+            if save_text_weights and i == 1:
+                save_path_full_weights = save_path_full_weights.replace(ext, f"_text{ext}")
+                
             # Load only the LoRAs from the state dict.
             lora_dict = loralb.lora_state_dict(model, bias=lora_bias)
-
+            
             # Save the models as fp32. This ensures we can finetune again without having to upcast.                      
-            save_method(lora_dict, save_path)
-            
-            if save_for_webui:
-            
-                # Pick the conversion script based off loop index (unet, text_encoder)
-                converter = (
-                    convert_unet_state_dict if i == 0 else
-                    convert_text_enc_state_dict
-                )
+            save_method(lora_dict, save_path_full_weights)
 
-                # Convert the keys to compvis model and webui 
-                lora_dict_fp16 = converter(lora_dict)
-                
-                # Cast tensors to fp16. It's assumed we won't be finetuning these.
-                for k, v in lora_dict_fp16.items():
-                    lora_dict_fp16[k] = v.to(dtype=torch.float16)
+        if save_for_webui:
             
-                save_method(lora_dict_fp16, path.replace(ext, f"_webui{ext}"))
+            # Convert the keys to compvis model and webui
+            unet_lora_dict = loralb.lora_state_dict(unet, bias=lora_bias) 
+            lora_dict_fp16 = convert_unet_state_dict(unet_lora_dict)
+            
+            if save_text_weights:
+                text_encoder_dict = loralb.lora_state_dict(text_encoder, bias=lora_bias)
+                lora_dict_text_fp16 = convert_text_enc_state_dict(text_encoder_dict)
 
+                # Update the Unet dict to include text keys.
+                lora_dict_fp16.update(lora_dict_text_fp16)
+
+            # Cast tensors to fp16. It's assumed we won't be finetuning these.
+            for k, v in lora_dict_fp16.items():
+                lora_dict_fp16[k] = v.to(dtype=torch.float16)
+
+            save_method(lora_dict_fp16, save_path.replace(ext, f"_webui{ext}"))
+
+# The non webui weights should be called here. Only the full weights will work
+# Load after instantiating LoRA weights to the model. 
 def load_lora(model, lora_path: str):
     try:
         if os.path.exists(lora_path):
