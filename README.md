@@ -157,7 +157,7 @@ save_lora(text_encoder=text_encoder, use_safetensors=True, path='save_file_path.
 - [x] Add Diffusers Training Scripts for Dreambooth and Finetuning.
 - [x] Implement saving and Loading LoRA's (`PT` & `safetensors`).
 - [x] Save LoRA for webui compatibility.
-- [ ] Add as a AUTOMATIC1111 webui extension for loading trained LoRA.
+- [x] Add as a AUTOMATIC1111 webui extension for loading trained LoRA.
 - [ ] Possible integrations for webui training.
 
 ## Credits
