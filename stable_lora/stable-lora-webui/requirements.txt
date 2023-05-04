@@ -1,0 +1,13 @@
+diffusers
+transformers
+accelerate
+scipy
+ftfy
+wandb
+numpy
+safetensors
+opencv-python
+torch
+torchvision
+git+https://github.com/microsoft/LoRA
+git+https://github.com/ExponentialML/Stable-LoRA
