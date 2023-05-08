@@ -1,6 +1,10 @@
 import torch
 import os
 import loralib as loralb
+import json
+
+from torch.utils.data import ConcatDataset
+from transformers import CLIPTokenizer
 from .convert_to_compvis import convert_unet_state_dict, convert_text_enc_state_dict
 
 try:
@@ -9,10 +13,10 @@ except:
     print("Safetensors is not installed. Saving while using use_safetensors will fail.")
 
 UNET_REPLACE = ["Transformer2DModel", "ResnetBlock2D"]
-TEXT_ENCODER_REPLACE = ["CLIPEncoderLayer"]
+TEXT_ENCODER_REPLACE = ["CLIPAttention", "CLIPTextEmbeddings"]
 
 UNET_ATTENTION_REPLACE = ["CrossAttention"]
-TEXT_ENCODER_ATTENTION_REPLACE = ["CLIPAttention"]
+TEXT_ENCODER_ATTENTION_REPLACE = ["CLIPAttention", "CLIPTextEmbeddings"]
 
 """
 Copied from: https://github.com/cloneofsimo/lora/blob/bdd51b04c49fa90a88919a19850ec3b4cf3c5ecd/lora_diffusion/lora.py#L189
@@ -21,7 +25,7 @@ def find_modules(
         model,
         ancestor_class= None,
         search_class = [torch.nn.Linear],
-        exclude_children_of = [loralb.Linear, loralb.Conv2d],
+        exclude_children_of = [loralb.Linear, loralb.Conv2d, loralb.Embedding],
     ):
         """
         Find all modules of a certain class (or union of classes) that are direct or
@@ -59,22 +63,88 @@ def find_modules(
                     # Otherwise, yield it
                     yield parent, name, module
 
-def create_lora_linear(child_module, r, dropout=0):
+def process_lora_metadata_dict(dataset):
+    keys_to_exclude = [
+        "center_crop", 
+        "color_jitter", 
+        "h_flip", 
+        "instance_data_root",
+        "instance_images_path",
+        "class_images_path",
+        "class_data_root",
+        "dataset_norm",
+        "image_transforms",
+        "_length",
+        "resize",
+        "normalized_mean_std"
+    ]
+    return {
+        k: str(v) for k, v in dataset.items() \
+            if (k not in keys_to_exclude and \
+                not isinstance(v, CLIPTokenizer))
+        }
+
+def create_lora_metadata(lora_name, train_dataset, r):
+    import uuid
+    is_concat_dataset = isinstance(train_dataset, ConcatDataset)
+    dataset = (
+        train_dataset.__dict__ if not is_concat_dataset
+            else 
+        [d.__dict__ for d in train_dataset.datasets]
+    )   
+    if is_concat_dataset:
+        dataset = [process_lora_metadata_dict(x) for x in dataset]
+    else:
+        dataset = process_lora_metadata_dict(dataset)
+    
+    metadata = {
+        "stable_lora": "v1", 
+        "lora_name": lora_name + "_" + uuid.uuid4().hex.lower()[:5],
+        "train_dataset": json.dumps(dataset, indent=4)
+    }
+    return metadata
+
+def create_lora_linear(child_module, r, dropout=0, bias=False, scale=0):
     return loralb.Linear(
         child_module.in_features, 
         child_module.out_features, 
+        merge_weights=False,
+        bias=bias,
+        lora_dropout=dropout,
+        lora_alpha=r,
+        r=r
+    )
+    return lora_linear
+
+def create_lora_conv(child_module, r, dropout=0, bias=False, rescale=False, scale=0):
+    return loralb.Conv2d(
+        child_module.in_channels, 
+        child_module.out_channels,
+        kernel_size=child_module.kernel_size[0],
+        padding=child_module.padding,
+        merge_weights=False,
+        bias=bias,
+        lora_dropout=dropout,
+        lora_alpha=r,
         r=r,
-        lora_dropout=dropout
+    )
+    return lora_conv    
+
+def create_lora_emb(child_module, r):
+    return loralb.Embedding(
+        child_module.num_embeddings, 
+        child_module.embedding_dim, 
+        merge_weights=False,
+        lora_alpha=r,
+        r=r
     )
 
-def create_lora_conv(child_module, r):
-    return loralb.Conv2d(
-                child_module.in_channels, 
-                child_module.out_channels,
-                kernel_size=child_module.kernel_size[0],
-                padding=child_module.padding,
-                r=r,
-            )
+def activate_lora_train(model, bias):
+    def unfreeze():
+        print(model.__class__.__name__ + " LoRA set for training.")
+        return loralb.mark_only_lora_as_trainable(model, bias=bias)
+
+    return unfreeze
 
 def add_lora_to(
     model, 
@@ -82,6 +152,7 @@ def add_lora_to(
     is_text=False,
     search_class=[torch.nn.Linear], 
     r=32, 
+    dropout=0,
     lora_bias='none'
 ):
     for module, name, child_module in find_modules(
@@ -89,28 +160,30 @@ def add_lora_to(
         ancestor_class=target_module, 
         search_class=search_class
     ):
-        # Drop 10% of the text conditioning to improve classifier free guidance
-        dropout = 0.1 if is_text else 0
+        bias = hasattr(child_module, "bias")
 
         # Check if the child module of the model is type Linear or Conv2d.
         if isinstance(child_module, torch.nn.Linear):
-            l = create_lora_linear(child_module, r, dropout)
+            l = create_lora_linear(child_module, r, dropout, bias=bias)
 
         if isinstance(child_module, torch.nn.Conv2d):
-            l = create_lora_conv(child_module, r)
+            l = create_lora_conv(child_module, r, dropout, bias=bias)
 
+        if isinstance(child_module, torch.nn.Embedding):
+            l = create_lora_emb(child_module, r)
+            
         # Check if child module of the model has bias.
-        if child_module.bias is not None: 
+        if bias:
             l.bias = child_module.bias
         
         # Assign the frozen weight of model's Linear or Conv2d to the LoRA model.
-        l.weight =  module._modules[name].weight
+        l.weight =  child_module.weight
 
         # Replace the new LoRA model with the model's Linear or Conv2d module.
         module._modules[name] = l
 
     # Unfreeze only the newly added LoRA weights, but keep the model frozen.
-    loralb.mark_only_lora_as_trainable(model, bias=lora_bias)
+    return activate_lora_train(model, lora_bias)
 
 def save_lora(
         unet=None, 
@@ -118,40 +191,36 @@ def save_lora(
         save_text_weights=False,
         output_dir="output",
         lora_filename="lora.safetensors",
-        use_safetensors=True, 
         lora_bias='none', 
-        save_for_webui=True
+        save_for_webui=True,
+        only_webui=False,
+        metadata=None
     ):
+        if not only_webui:
+            # Create directory for the full LoRA weights.
+            trainable_weights_dir = f"{output_dir}/full_weights"
+            lora_out_file_full_weight = f"{trainable_weights_dir}/{lora_filename}"
+            os.makedirs(trainable_weights_dir, exist_ok=True)
 
-        # Create directory for the full LoRA weights.
-        trainable_weights_dir = f"{output_dir}/full_weights"
-        lora_out_file_full_weight = f"{trainable_weights_dir}/{lora_filename}"
-        os.makedirs(trainable_weights_dir, exist_ok=True)
-
+        ext = '.safetensors'
         # Create LoRA out filename.
-        lora_out_file = f"{output_dir}/{lora_filename}"
+        lora_out_file = f"{output_dir}/{lora_filename}{ext}"
 
-        # Get save method depending on use_safetensors
-        save_method = save_file if use_safetensors else torch.save
-        
-        if use_safetensors:
-            ext = '.safetensors'
-            save_path_full_weights = lora_out_file_full_weight.replace('.pt', ext)
-            save_path = lora_out_file.replace('.pt',ext)
-        else:
-            ext = '.pt'
-            save_path_full_weights = lora_out_file_full_weight.replace('.safetensors', ext)
-            save_path = lora_out_file.replace('.safetensors', ext)
+        if not only_webui:
+            save_path_full_weights = lora_out_file_full_weight
 
-        for i, model in enumerate([unet, text_encoder]):
-            if save_text_weights and i == 1:
-                save_path_full_weights = save_path_full_weights.replace(ext, f"_text{ext}")
+        save_path = lora_out_file
+
+        if not only_webui:
+            for i, model in enumerate([unet, text_encoder]):
+                if save_text_weights and i == 1:
+                    save_path_full_weights = save_path_full_weights.replace(ext, f"_text{ext}")
+                    
+                # Load only the LoRAs from the state dict.
+                lora_dict = loralb.lora_state_dict(model, bias=lora_bias)
                 
-            # Load only the LoRAs from the state dict.
-            lora_dict = loralb.lora_state_dict(model, bias=lora_bias)
-            
-            # Save the models as fp32. This ensures we can finetune again without having to upcast.                      
-            save_method(lora_dict, save_path_full_weights)
+                # Save the models as fp32. This ensures we can finetune again without having to upcast.                      
+                save_file(lora_dict, save_path_full_weights)
 
         if save_for_webui:
             
@@ -162,7 +231,7 @@ def save_lora(
             if save_text_weights:
                 text_encoder_dict = loralb.lora_state_dict(text_encoder, bias=lora_bias)
                 lora_dict_text_fp16 = convert_text_enc_state_dict(text_encoder_dict)
-
+                
                 # Update the Unet dict to include text keys.
                 lora_dict_fp16.update(lora_dict_text_fp16)
 
@@ -170,35 +239,30 @@ def save_lora(
             for k, v in lora_dict_fp16.items():
                 lora_dict_fp16[k] = v.to(dtype=torch.float16)
 
-            save_method(lora_dict_fp16, save_path.replace(ext, f"_webui{ext}"))
+            save_file(
+                lora_dict_fp16, 
+                save_path, 
+                metadata=metadata
+            )
 
-# The non webui weights should be called here. Only the full weights will work
-# Load after instantiating LoRA weights to the model. 
 def load_lora(model, lora_path: str):
     try:
         if os.path.exists(lora_path):
-
-            if lora_path.endswith('.safetensors'):
-                lora_dict = safe_open(lora_path, framework='pt')
-            else:
-                lora_dict = torch.load(lora_path)
-
+            lora_dict = safe_open(lora_path, framework='pt')
             model.load_state_dict(lora_dict, strict=False)
 
     except Exception as e:
         print(f"Could not load your lora file: {e}")
 
 def set_mode(model, train=False):
-    is_train = False
-    is_eval = False
     for n, m in model.named_modules():
-        is_lora = isinstance(m, loralb.Linear) or isinstance(m, loralb.Conv2d)
+        is_lora = any(
+            isinstance(m,x) for x in [loralb.Linear, loralb.Conv2d, loralb.Embedding]
+        )
         if is_lora:
-            if train:
-                is_train = True
-            else:
-                is_eval = True
-                m.train(train)
-    
-    if is_train: print("Train mode enabled for LoRA.")
-    if is_eval: print("Evaluation mode enabled for LoRA.")
+            m.train(train)
+
+def set_mode_group(models, train):
+   for model in models: 
+        set_mode(model)
+        model.train(train)
