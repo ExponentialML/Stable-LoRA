@@ -1,19 +1,21 @@
 # Bootstrapped from:
 # https://github.com/cloneofsimo/lora/blob/master/training_scripts/train_lora_dreambooth.py
 
-import argparse
 import hashlib
 import itertools
 import math
 import os
-import inspect
-from pathlib import Path
-from typing import Optional
-
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import json
+import random
+import re
+
+from pathlib import Path
+from typing import Optional
+from tqdm.auto import tqdm
+from PIL import Image
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -27,593 +29,19 @@ from diffusers import (
     Transformer2DModel
 )
 from diffusers.optimization import get_scheduler
-from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-
-from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
-from stable_lora.lora import add_lora_to, save_lora, set_mode, \
-    UNET_REPLACE, TEXT_ENCODER_REPLACE
+from stable_lora.lora import add_lora_to, save_lora, create_lora_metadata, \
+    UNET_REPLACE, TEXT_ENCODER_REPLACE, \
+    UNET_ATTENTION_REPLACE, TEXT_ENCODER_ATTENTION_REPLACE
 
-from pathlib import Path
-
-import random
-import re
-
-class DreamBoothDataset(Dataset):
-    """
-    A dataset to prepare the instance and class images with the prompts for fine-tuning the model.
-    It pre-processes the images and the tokenizes prompts.
-    """
-
-    def __init__(
-        self,
-        instance_data_root,
-        instance_prompt,
-        tokenizer,
-        class_data_root=None,
-        class_prompt=None,
-        size=512,
-        center_crop=False,
-        color_jitter=False,
-        h_flip=False,
-        resize=False,
-        dataset_norm=False
-    ):
-        self.size = size
-        self.center_crop = center_crop
-        self.color_jitter = color_jitter
-        self.h_flip = h_flip
-        self.tokenizer = tokenizer
-        self.resize = resize
-        self.dataset_norm = dataset_norm
-
-        self.instance_data_root = Path(instance_data_root)
-        if not self.instance_data_root.exists():
-            raise ValueError("Instance images root doesn't exists.")
-
-        self.instance_images_path = list(Path(instance_data_root).iterdir())
-        self.num_instance_images = len(self.instance_images_path)
-        self.instance_prompt = instance_prompt
-        self._length = self.num_instance_images
-
-        if class_data_root is not None:
-            self.class_data_root = Path(class_data_root)
-            self.class_data_root.mkdir(parents=True, exist_ok=True)
-            self.class_images_path = list(self.class_data_root.iterdir())
-            self.num_class_images = len(self.class_images_path)
-            self._length = max(self.num_class_images, self.num_instance_images)
-            self.class_prompt = class_prompt
-        else:
-            self.class_data_root = None
-        
-        self.image_transforms = self.compose()
-        self.normalized_mean_std = self.get_dataset_norm(class_data_root)
-
-
-    def gather_norm(self, img, mean=None, std=None):
-        channels = img.shape[0]
-
-        if all(x is None for x in [mean, std]):
-            mean, std = torch.zeros(channels), torch.zeros(channels)
-
-        for i in range(channels):
-            mean[i] += img[i, :, :].mean()
-            std[i] += img[i, :, :].std()    
-        
-        return mean, std
-
-    def get_dataset_norm(self, class_data_root):
-        if self.dataset_norm:
-            imgs_to_process = self.instance_images_path
-            
-            if class_data_root is not None:
-                imgs_to_process += self.class_images_path
-
-            mean = None
-            std = None
-            
-            for img in tqdm(imgs_to_process, desc="Processing image normalization..."):
-                img = Image.open(img).convert("RGB")
-                img = self.image_transforms(img)
-                
-                mean, std = self.gather_norm(img, mean, std)
-
-            mean.div_(len(imgs_to_process))
-            std.div_(len(imgs_to_process))
-
-            print(f"Dataset mean and std are: {mean}, {std}")
-            
-            return mean, std
-        else:
-            return [0.5], [0.5]
-
-    def compose(self):
-        img_transforms = []
-
-        if self.resize:
-            img_transforms.append(
-                transforms.Resize(
-                    (self.size, self.size), interpolation=transforms.InterpolationMode.BILINEAR
-                )
-            )
-        if self.center_crop:
-            img_transforms.append(transforms.CenterCrop(size))
-        if self.color_jitter:
-            img_transforms.append(transforms.ColorJitter(0.2, 0.1))
-        if self.h_flip:
-            img_transforms.append(transforms.RandomHorizontalFlip())
-
-        return transforms.Compose([*img_transforms, transforms.ToTensor()])
-        
-    def image_transform(self, img): 
-        img_composed = self.image_transforms(img)
-
-        if not self.dataset_norm:
-            mean, std = self.gather_norm(img_composed)
-        else:
-            mean, std = self.normalized_mean_std
-
-        return transforms.Normalize(mean, std)(img_composed)
-
-    def open_img(self, index, folder): 
-        img = Image.open(folder[index % self.num_instance_images])
-
-        if not img.mode == "RGB":
-            img = img.convert("RGB")
-
-        return img
-
-    def tokenize_prompt(self, prompt):
-        return self.tokenizer(
-            prompt,
-            padding="do_not_pad",
-            truncation=True,
-            max_length=self.tokenizer.model_max_length,
-        ).input_ids
-
-
-    def get_train_sample(self, index, example, base_name, folder, prompt):
-        image = self.open_img(index, self.instance_images_path)
-        example[f"{base_name}_images"] = self.image_transform(image)
-        example[f"{base_name}_prompt_ids"] = self.tokenize_prompt(prompt)
-        example[f"{base_name}_prompt"] = prompt
-
-    def __len__(self):
-        return self._length
-
-    def __getitem__(self, index):
-        example = {}
-        
-        self.get_train_sample(
-            index, 
-            example, 
-            "instance", 
-            self.instance_images_path, 
-            self.instance_prompt
-        )
-
-        if self.class_data_root:
-            self.get_train_sample(
-                index, 
-                example, 
-                "class", 
-                self.class_images_path, 
-                self.class_prompt
-            )
-        return example
-
-class PromptDataset(Dataset):
-    "A simple dataset to prepare the prompts to generate class images on multiple GPUs."
-
-    def __init__(self, prompt, num_samples):
-        self.prompt = prompt
-        self.num_samples = num_samples
-
-    def __len__(self):
-        return self.num_samples
-
-    def __getitem__(self, index):
-        example = {}
-        example["prompt"] = self.prompt
-        example["index"] = index
-        return example
-
+from stable_lora.utils.dataset import DreamBoothDataset, PromptDataset
+from stable_lora.utils.train_args import parse_args
 
 logger = get_logger(__name__)
 
-def prior_preservation_loss(model_pred, target, prior_loss_weight, mode="additive"):
-    model_pred, prior_pred = torch.chunk(model_pred, 2, dim=0)
-    model_target, prior_target = torch.chunk(target, 2, dim=0)
-
-    loss = F.mse_loss(model_pred.float(), model_target.float(), reduction="mean")
-    prior_loss = F.mse_loss(prior_pred.float(), prior_target.float(), reduction="mean")
-
-    if mode is not None and mode == "additive":
-        loss = loss + (prior_loss * prior_loss_weight)
-    else:
-        loss = loss + prior_loss_weight * prior_loss
-    return loss
-
-def set_mode_wrapper(unet=None, text_encoder=None, is_train=False):
-    for model in [unet, text_encoder]:
-        if model is not None:
-            model.train() if is_train else model.eval()
-            set_mode(model, train=is_train)
-
-def parse_args(input_args=None):
-    parser = argparse.ArgumentParser(description="Simple example of a training script.")
-    parser.add_argument(
-        "--pretrained_model_name_or_path",
-        type=str,
-        default=None,
-        required=True,
-        help="Path to pretrained model or model identifier from huggingface.co/models.",
-    )
-    parser.add_argument(
-        "--pretrained_vae_name_or_path",
-        type=str,
-        default=None,
-        help="Path to pretrained vae or vae identifier from huggingface.co/models.",
-    )
-    parser.add_argument(
-        "--revision",
-        type=str,
-        default=None,
-        required=False,
-        help="Revision of pretrained model identifier from huggingface.co/models.",
-    )
-    parser.add_argument(
-        "--tokenizer_name",
-        type=str,
-        default=None,
-        help="Pretrained tokenizer name or path if not the same as model_name",
-    )
-    parser.add_argument(
-        "--instance_data_dir",
-        type=str,
-        default=None,
-        required=True,
-        help="A folder containing the training data of instance images.",
-    )
-    parser.add_argument(
-        "--class_data_dir",
-        type=str,
-        default=None,
-        required=False,
-        help="A folder containing the training data of class images.",
-    )
-    parser.add_argument(
-        "--json_path",
-        type=str,
-        default="",
-        required=True,
-        help="A JSON file with the same args as argparse (instance_data_dir, class_data_dir, etc.)",
-    )
-    parser.add_argument(
-        "--instance_prompt",
-        type=str,
-        default=None,
-        required=True,
-        help="The prompt with identifier specifying the instance",
-    )
-    parser.add_argument(
-        "--preview_prompt",
-        type=str,
-        default=None,
-        help="The prompt to use when generating preview images",
-    )
-    parser.add_argument(
-        "--class_prompt",
-        type=str,
-        default=None,
-        help="The prompt to specify images in the same class as provided instance images.",
-    )
-    parser.add_argument(
-        "--with_prior_preservation",
-        default=False,
-        action="store_true",
-        help="Flag to add prior preservation loss.",
-    )
-    parser.add_argument(
-        "--prior_loss_weight",
-        type=float,
-        default=1.0,
-        help="The weight of prior preservation loss.",
-    )
-    parser.add_argument(
-        "--prior_preservation_mode",
-        type=str,
-        choices=["additive", "multiply"],
-        default="additive",
-        help=("The prior preservation loss mode."
-            "Additive: loss + (prior_loss * loss_weight)"
-            "Multiply: loss + loss_weight * prior_loss"
-        )
-    )
-    parser.add_argument(
-        "--num_class_images",
-        type=int,
-        default=800,
-        help=(
-            "Minimal class images for prior preservation loss. If not have enough images, additional images will be"
-            " sampled with class_prompt."
-        ),
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="text-inversion-model",
-        help="The output directory where the model predictions and checkpoints will be written.",
-    )
-    parser.add_argument(
-        "--seed", type=int, default=None, help="A seed for reproducible training."
-    )
-    parser.add_argument(
-        "--resolution",
-        type=int,
-        default=512,
-        help=(
-            "The resolution for input images, all the images in the train/validation dataset will be resized to this"
-            " resolution"
-        ),
-    )
-    parser.add_argument(
-        "--center_crop",
-        action="store_true",
-        help="Whether to center crop images before resizing to resolution",
-    )
-    parser.add_argument(
-        "--color_jitter",
-        action="store_true",
-        help="Whether to apply color jitter to images",
-    )
-    parser.add_argument(
-        "--train_text_encoder",
-        action="store_true",
-        help="Whether to train the text encoder",
-    )
-    parser.add_argument(
-        "--train_batch_size",
-        type=int,
-        default=1,
-        help="Batch size (per device) for the training dataloader.",
-    )
-    parser.add_argument(
-        "--sample_batch_size",
-        type=int,
-        default=1,
-        help="Batch size (per device) for sampling images.",
-    )
-    parser.add_argument("--num_train_epochs", type=int, default=1)
-    parser.add_argument(
-        "--max_train_steps",
-        type=int,
-        default=None,
-        help="Total number of training steps to perform.  If provided, overrides num_train_epochs.",
-    )
-    parser.add_argument(
-        "--save_steps",
-        type=int,
-        default=500,
-        help="Save checkpoint every X updates steps.",
-    )
-    parser.add_argument(
-        "--save_for_webui",
-        action="store_true",
-        default=True,
-        help="Save a LoRA model for usage in the AUTOMATIC1111 webui.",
-    )
-    parser.add_argument(
-        "--preview_steps",
-        type=int,
-        default=100,
-        help="Save preview every X updates steps.",
-    )
-    parser.add_argument(
-        "--gradient_accumulation_steps",
-        type=int,
-        default=1,
-        help="Number of updates steps to accumulate before performing a backward/update pass.",
-    )
-    parser.add_argument(
-        "--gradient_checkpointing",
-        action="store_true",
-        help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",
-    )
-    parser.add_argument(
-        "--lora_rank",
-        type=int,
-        default=4,
-        help="Rank of LoRA approximation.",
-    )
-    parser.add_argument(
-        "--lora_bias",
-        type=str,
-        default="all",
-        help="Whether or not to use bias when training LoRA.",
-        choices=["none", "lora_only", "all"]
-    )
-    parser.add_argument(
-        "--learning_rate",
-        type=float,
-        default=None,
-        help="Initial learning rate (after the potential warmup period) to use.",
-    )
-    parser.add_argument(
-        "--learning_rate_text",
-        type=float,
-        default=5e-6,
-        help="Initial learning rate for text encoder (after the potential warmup period) to use.",
-    )
-    parser.add_argument(
-        "--scale_lr",
-        action="store_true",
-        default=False,
-        help="Scale the learning rate by the number of GPUs, gradient accumulation steps, and batch size.",
-    )
-    parser.add_argument(
-        "--dataset_norm",
-        action="store_true",
-        default=False,
-        help="Normalizes the entire dataset by calculating the mean and standard deviation of all elements.",
-    )
-    parser.add_argument(
-        "--save_preview",
-        action="store_true",
-        default=False,
-        help="Save preview images during training.",
-    )
-    parser.add_argument(
-        "--lr_scheduler",
-        type=str,
-        default="constant",
-        help=(
-            'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
-            ' "constant", "constant_with_warmup"]'
-        ),
-    )
-    parser.add_argument(
-        "--lr_warmup_steps",
-        type=int,
-        default=500,
-        help="Number of steps for the warmup in the lr scheduler.",
-    )
-    parser.add_argument(
-        "--use_8bit_adam",
-        action="store_true",
-        help="Whether or not to use 8-bit Adam from bitsandbytes.",
-    )
-    parser.add_argument(
-        "--adam_beta1",
-        type=float,
-        default=0.9,
-        help="The beta1 parameter for the Adam optimizer.",
-    )
-    parser.add_argument(
-        "--adam_beta2",
-        type=float,
-        default=0.999,
-        help="The beta2 parameter for the Adam optimizer.",
-    )
-    parser.add_argument(
-        "--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use."
-    )
-    parser.add_argument(
-        "--adam_epsilon",
-        type=float,
-        default=1e-08,
-        help="Epsilon value for the Adam optimizer",
-    )
-    parser.add_argument(
-        "--max_grad_norm", default=1.0, type=float, help="Max gradient norm."
-    )
-    parser.add_argument(
-        "--push_to_hub",
-        action="store_true",
-        help="Whether or not to push the model to the Hub.",
-    )
-    parser.add_argument(
-        "--hub_token",
-        type=str,
-        default=None,
-        help="The token to use to push to the Model Hub.",
-    )
-    parser.add_argument(
-        "--logging_dir",
-        type=str,
-        default="logs",
-        help=(
-            "[TensorBoard](https://www.tensorflow.org/tensorboard) log directory. Will default to"
-            " *output_dir/runs/**CURRENT_DATETIME_HOSTNAME***."
-        ),
-    )
-    parser.add_argument(
-        "--mixed_precision",
-        type=str,
-        default=None,
-        choices=["no", "fp16", "bf16"],
-        help=(
-            "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
-            " 1.10.and an Nvidia Ampere GPU.  Default to the value of accelerate config of the current system or the"
-            " flag passed with the `accelerate.launch` command. Use this argument to override the accelerate config."
-        ),
-    )
-    parser.add_argument(
-        "--local_rank",
-        type=int,
-        default=-1,
-        help="For distributed training: local_rank. Not to be confused with LoRA rank.",
-    )
-    parser.add_argument(
-        "--resume_unet",
-        type=str,
-        default=None,
-        help=("File path for unet lora to resume training."),
-    )
-    parser.add_argument(
-        "--resume_text_encoder",
-        type=str,
-        default=None,
-        help=("File path for text encoder lora to resume training."),
-    )
-    parser.add_argument(
-        "--resize",
-        type=bool,
-        default=True,
-        required=False,
-        help="Should images be resized to --resolution before training?",
-    )
-    parser.add_argument(
-        "--use_xformers", action="store_true", help="Whether or not to use xformers"
-    )
-
-    if input_args is not None:
-        args = parser.parse_args(input_args)
-    else:
-        args = parser.parse_args()
-
-    env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if env_local_rank != -1 and env_local_rank != args.local_rank:
-        args.local_rank = env_local_rank
-
-    if args.with_prior_preservation:
-        if args.class_data_dir is None:
-            raise ValueError("You must specify a data directory for class images.")
-        if args.class_prompt is None:
-            raise ValueError("You must specify prompt for class images.")
-
-    return args
-
-def main(args):
-    
-    logging_dir = os.path.join(args.output_dir, 'logs')
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    accelerator = Accelerator(
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        mixed_precision=args.mixed_precision,
-        log_with="tensorboard",
-        logging_dir=logging_dir,
-    )
-
-    # Currently, it's not possible to do gradient accumulation when training two models with accelerate.accumulate
-    # This will be enabled soon in accelerate. For now, we don't allow gradient accumulation when training two models.
-    # TODO (patil-suraj): Remove this check when gradient accumulation with two models is enabled in accelerate.
-    if (
-        args.train_text_encoder
-        and args.gradient_accumulation_steps > 1
-        and accelerator.num_processes > 1
-    ):
-        raise ValueError(
-            "Gradient accumulation is not supported when training the text encoder in distributed training. "
-            "Please set gradient_accumulation_steps to 1. This feature will be supported in the future."
-        )
-
-    if args.seed is not None:
-        set_seed(args.seed)
-
+def generate_class_images(args):
     if args.with_prior_preservation:
         class_images_dir = Path(args.class_data_dir)
         if not class_images_dir.exists():
@@ -662,6 +90,99 @@ def main(args):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+def prior_preservation_loss(model_pred, target, prior_loss_weight, mode="additive"):
+    
+    if mode in ["additive", "multiply"]:
+        model_pred_chunk, prior_pred = torch.chunk(model_pred, 2, dim=0)
+        model_target, prior_target = torch.chunk(target, 2, dim=0)
+
+        loss = F.mse_loss(model_pred_chunk.float(), model_target.float(), reduction="mean")
+        prior_loss = F.mse_loss(prior_pred.float(), prior_target.float(), reduction="mean")
+
+    if mode == "additive":
+        loss = loss + (prior_loss * prior_loss_weight)
+
+    elif mode == "multiply":
+        loss = loss + prior_loss_weight * prior_loss
+
+    elif mode in ["single_pass", "text"]:
+        loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+
+    else:
+        raise ValueError("Incorrect mode for prior preservation loss")
+    
+    return loss
+
+def token_tuning(word: str, class_token: str, tokenizer: CLIPTokenizer, text_encoder: CLIPTextModel):
+    with torch.no_grad():
+        token = tokenizer(f"{word}", add_special_tokens=False).input_ids[0]
+        class_token = tokenizer(f"{class_token}", add_special_tokens=False).input_ids[0]
+
+        class_token_weight = text_encoder.text_model.embeddings.token_embedding.weight[class_token, :]
+        text_encoder.text_model.embeddings.token_embedding.weight[token, :] = class_token_weight
+
+        print(f"{token} has been initialized with {class_token}")
+
+def collate_fn(examples, tokenizer: CLIPTokenizer):
+        input_ids = [example["instance_prompt_ids"] for example in examples]
+        pixel_values = [example["instance_images"] for example in examples]
+        prompt = [example["instance_prompt"] for example in examples]
+        img_name = [example["instance_img_name"] for example in examples]
+
+        # Concat class and instance examples for prior preservation.
+        # We do this to avoid doing two forward passes.
+        if args.with_prior_preservation:
+            input_ids += [example["class_prompt_ids"] for example in examples]
+            pixel_values += [example["class_images"] for example in examples]
+
+        pixel_values = torch.stack(pixel_values)
+        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+
+        input_ids = tokenizer.pad(
+            {"input_ids": input_ids},
+            padding="max_length",
+            max_length=tokenizer.model_max_length,
+            return_tensors="pt",
+        ).input_ids
+
+        batch = {
+            "input_ids": input_ids,
+            "pixel_values": pixel_values,
+            "prompt": prompt,
+            "instance_img_name": img_name
+        }
+        return batch
+
+def main(args):
+    
+    logging_dir = os.path.join(args.output_dir, 'logs')
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    generate_class_images(args)
+
+    accelerator = Accelerator(
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        mixed_precision=args.mixed_precision,
+        log_with="tensorboard",
+        logging_dir=logging_dir,
+    )
+
+    # Currently, it's not possible to do gradient accumulation when training two models with accelerate.accumulate
+    # This will be enabled soon in accelerate. For now, we don't allow gradient accumulation when training two models.
+    # TODO (patil-suraj): Remove this check when gradient accumulation with two models is enabled in accelerate.
+    if (
+        args.train_text_encoder
+        and args.gradient_accumulation_steps > 1
+        and accelerator.num_processes > 1
+    ):
+        raise ValueError(
+            "Gradient accumulation is not supported when training the text encoder in distributed training. "
+            "Please set gradient_accumulation_steps to 1. This feature will be supported in the future."
+        )
+
+    if args.seed is not None:
+        set_seed(args.seed)
+
     # Handle the repository creation
     if accelerator.is_main_process:
 
@@ -686,6 +207,7 @@ def main(args):
         args.pretrained_model_name_or_path,
         subfolder="text_encoder",
         revision=args.revision,
+        num_hidden_layers=args.clip_layers
     )
     vae = AutoencoderKL.from_pretrained(
         args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
@@ -702,7 +224,7 @@ def main(args):
         model.requires_grad_(False)
 
     if args.use_xformers:
-        unet.set_use_memory_efficient_attention_xformers(True)
+        unet.enable_xformers_memory_efficient_attention()
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
@@ -712,19 +234,28 @@ def main(args):
     if args.resume_unet or args.resume_text_encoder:
         logger.warn("Resuming training for LoRA is not yet implemented.")
 
-    add_lora_to(
+    unet_replace = UNET_ATTENTION_REPLACE if args.only_attn else UNET_REPLACE
+    text_replace = TEXT_ENCODER_ATTENTION_REPLACE if args.only_attn else TEXT_ENCODER_REPLACE
+
+    #token_tuning(args.instance_prompt, args.class_prompt, tokenizer, text_encoder)
+    
+    train_text_encoder_lora = None
+    train_unet_lora = add_lora_to(
         unet, 
-        target_module=UNET_REPLACE, 
+        target_module=unet_replace, 
         search_class=[torch.nn.Linear, torch.nn.Conv2d], 
         r=args.lora_rank,
         lora_bias=args.lora_bias
     )
 
     if args.train_text_encoder:
-        add_lora_to(
+        train_text_encoder_lora = add_lora_to(
             text_encoder, 
-            target_module=TEXT_ENCODER_REPLACE, 
+            is_text=True,
+            target_module=text_replace,
+            search_class=[torch.nn.Linear, torch.nn.Embedding],
             r=args.lora_rank,
+            dropout=args.dropout,
             lora_bias=args.lora_bias
         )
 
@@ -766,17 +297,15 @@ def main(args):
     )
 
     params_to_optimize = list(unet.parameters())
-
     if args.train_text_encoder: 
-        params_to_optimize += list(text_encoder.parameters())
-
+        params_to_optimize += list(text_encoder.parameters()) 
+    
     optimizer = optimizer_class(
         params_to_optimize,
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
-        amsgrad=True
     )
 
     noise_scheduler = DDPMScheduler.from_config(
@@ -827,39 +356,11 @@ def main(args):
             dataset_norm=args.dataset_norm
         )
 
-    def collate_fn(examples):
-        input_ids = [example["instance_prompt_ids"] for example in examples]
-        pixel_values = [example["instance_images"] for example in examples]
-        prompt = [example["instance_prompt"] for example in examples]
-
-        # Concat class and instance examples for prior preservation.
-        # We do this to avoid doing two forward passes.
-        if args.with_prior_preservation:
-            input_ids += [example["class_prompt_ids"] for example in examples]
-            pixel_values += [example["class_images"] for example in examples]
-
-        pixel_values = torch.stack(pixel_values)
-        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-
-        input_ids = tokenizer.pad(
-            {"input_ids": input_ids},
-            padding="max_length",
-            max_length=tokenizer.model_max_length,
-            return_tensors="pt",
-        ).input_ids
-
-        batch = {
-            "input_ids": input_ids,
-            "pixel_values": pixel_values,
-            "prompt": prompt
-        }
-        return batch
-
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.train_batch_size,
         shuffle=True,
-        collate_fn=collate_fn,
+        collate_fn=lambda examples: collate_fn(examples, tokenizer),
         num_workers=0,
     )
 
@@ -928,6 +429,18 @@ def main(args):
         * args.gradient_accumulation_steps
     )
 
+    # Create LoRA metadata that contains train parameters
+    lora_metadata = create_lora_metadata(
+        args.lora_name,
+        train_dataset=train_dataset,
+        r=args.lora_rank
+    )
+
+    # Unfreeze the LoRA parameters for training.
+    for train_lora in [train_unet_lora, train_text_encoder_lora]:
+        if train_lora is not None:
+            train_lora()
+
     print("***** Running training *****")
     print(f"  Num examples = {len(train_dataset)}")
     print(f"  Num batches each epoch = {len(train_dataloader)}")
@@ -944,14 +457,15 @@ def main(args):
         range(args.max_train_steps), disable=not accelerator.is_local_main_process
     )
     progress_bar.set_description("Steps")
+    lora_save_msg = "Pending"
     global_step = 0
     last_save = 0
 
     for epoch in range(args.num_train_epochs): 
         for step, batch in enumerate(train_dataloader):
-            unet.train()
-            if args.train_text_encoder:
-                text_encoder.train()
+            #unet.train()
+            #if args.train_text_encoder:
+            #    text_encoder.train()
 
             # Convert images to latent space
             latents = vae.encode(
@@ -975,8 +489,32 @@ def main(args):
             # (this is the forward diffusion process)
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
+            # TODO Test prior preservation based on text encoding positioning
+            
             # Get the text embedding for conditioning
-            encoder_hidden_states = text_encoder(batch["input_ids"])[0]
+            input_ids = batch["input_ids"]
+            if args.prior_preservation_mode == "text" and args.with_prior_preservation:
+                
+                # Don't compute gradients for our class prompt
+                with torch.no_grad():
+                    class_hidden_states = text_encoder(input_ids[1].unsqueeze(0))[0]
+                    class_hidden_states /=  class_hidden_states.norm(dim=-1, keepdim=True)
+
+                # Compute them for our instance prompt
+                encoder_hidden_states = text_encoder(input_ids[0].unsqueeze(0))[0]
+            
+                # Use class prompt as base starting point for instance prompt
+                encoder_hidden_states = (
+                    class_hidden_states + (encoder_hidden_states * args.prior_loss_weight)
+                )
+                
+                # We only need to process the instance batch
+                noisy_latents = noisy_latents[0].unsqueeze(0)
+                noise = noise[0].unsqueeze(0)
+                timesteps = timesteps[0].unsqueeze(0)
+
+            else:
+                encoder_hidden_states = text_encoder(input_ids)[0]
 
             # Predict the noise residual
             model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
@@ -992,7 +530,12 @@ def main(args):
                 )
 
             if args.with_prior_preservation:
-                loss = prior_preservation_loss(model_pred, target, args.prior_loss_weight, mode=args.prior_preservation_mode)
+                loss = prior_preservation_loss(
+                    model_pred, 
+                    target, 
+                    args.prior_loss_weight, 
+                    mode=args.prior_preservation_mode
+                )              
             else:
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 
@@ -1010,7 +553,7 @@ def main(args):
             optimizer.zero_grad()
 
             global_step += 1
-            
+        
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 
@@ -1034,19 +577,15 @@ def main(args):
                             preview_dir = f"{args.output_dir}/previews"
                             os.makedirs(preview_dir, exist_ok=True)
                            
-                            set_mode_wrapper(unet, text_encoder, is_train=False)
-                             
-                            prompt = batch['prompt'] if len(args.preview_prompt) <= 0 else args.preview_prompt 
+                            prompt = batch['prompt'][0] if len(args.preview_prompt) <= 0 else args.preview_prompt 
                             image = pipeline(prompt, num_inference_steps=20, width=args.resolution, height=args.resolution).images[0]
-                            image.save(f"{preview_dir}/{prompt}_{args.save_steps}_{last_save}_{global_step}.png")  
+                            image.save(f"{preview_dir}/{last_save}_g{global_step}_{prompt}.png")  
 
-                            set_mode_wrapper(unet, text_encoder, is_train=True)
-                    
                     del pipeline
 
                 if args.save_steps and global_step - last_save >= args.save_steps:
                     if accelerator.is_main_process:
-                        lora_out_file = f"lora_weight_e{epoch}_s{global_step}.safetensors"
+                        lora_out_file = f"{args.lora_name}_e{epoch}_s{global_step}.safetensors"
                         save_lora(
                             unet=unet, 
                             text_encoder=text_encoder,
@@ -1054,12 +593,18 @@ def main(args):
                             output_dir=args.output_dir,
                             lora_filename=lora_out_file,
                             lora_bias=args.lora_bias, 
-                            save_for_webui=args.save_for_webui
+                            save_for_webui=args.save_for_webui,
+                            only_webui=args.only_webui,
+                            metadata=lora_metadata
                         )
-                        print(f"LoRA checkpoints have been saved to {args.output_dir}")
+                        lora_save_msg = f"LoRA saved to {args.output_dir}."
                         last_save = global_step
 
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {
+                "Loss:": loss.detach().item(), 
+                "LR": lr_scheduler.get_last_lr()[0],
+                "Last Save": lora_save_msg
+                }   
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 
