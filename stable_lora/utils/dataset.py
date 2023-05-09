@@ -121,8 +121,8 @@ class DreamBoothDataset(Dataset):
 
         return transforms.Normalize(mean, std)(img_composed)
 
-    def open_img(self, index, folder):
-        img_path =  folder[index % self.num_instance_images]
+    def open_img(self, index, folder, num_imgs):
+        img_path =  folder[index % num_imgs]
         img = Image.open(img_path)
 
         if not img.mode == "RGB":
@@ -139,8 +139,8 @@ class DreamBoothDataset(Dataset):
         ).input_ids
 
 
-    def get_train_sample(self, index, example, base_name, folder, prompt):
-        image, img_name = self.open_img(index, self.instance_images_path)
+    def get_train_sample(self, index, example, base_name, folder, prompt, num_imgs):
+        image, img_name = self.open_img(index, folder, num_imgs)
         example[f"{base_name}_images"] = self.image_transform(image)
         example[f"{base_name}_prompt_ids"] = self.tokenize_prompt(prompt)
         example[f"{base_name}_prompt"] = prompt
@@ -157,7 +157,8 @@ class DreamBoothDataset(Dataset):
             example, 
             "instance", 
             self.instance_images_path, 
-            self.instance_prompt
+            self.instance_prompt,
+            self.num_instance_images
         )
 
         if self.class_data_root:
@@ -166,7 +167,8 @@ class DreamBoothDataset(Dataset):
                 example, 
                 "class", 
                 self.class_images_path, 
-                self.class_prompt
+                self.class_prompt,
+                self.num_class_images
             )
         return example
 
